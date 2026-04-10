@@ -38,7 +38,6 @@ except ImportError:
 #  Utilitaires
 # ─────────────────────────────────────────────
 def _entropy(data: bytes) -> float:
-    """Calcule l'entropie de Shannon d'une séquence d'octets."""
     if not data:
         return 0.0
     freq = [0] * 256
