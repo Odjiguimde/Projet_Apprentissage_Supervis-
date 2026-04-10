@@ -53,7 +53,6 @@ def _entropy(data: bytes) -> float:
 
 
 def _safe_get(pe_attr, default=0):
-    """Retourne la valeur d'un attribut PE ou une valeur par défaut."""
     try:
         return pe_attr
     except Exception:
