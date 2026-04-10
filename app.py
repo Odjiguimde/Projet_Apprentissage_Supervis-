@@ -1139,12 +1139,14 @@ with tabs[6]:
     active_model = grid_res['best_model'] if (run_grid and grid_res) else results[champion]['model']
     needs_scale  = results[champion]['needs_scale'] if champion in results else True
 
-    st.markdown(f"""
-    <div class='info-card'>
-    <b>Modèle actif :</b> {champion}
-    {'(GridSearch optimisé)' if (run_grid and grid_res) else '(modèle de base)'}
-    · F1 = {(grid_res['f1'] if (run_grid and grid_res) else results[champion]['f1']):.4f}
-    </div>""", unsafe_allow_html=True)
+    _opt_label = "(GridSearch optimisé)" if (run_grid and grid_res) else "(modèle de base)"
+    _active_f1 = grid_res["f1"] if (run_grid and grid_res) else results[champion]["f1"]
+    st.markdown(
+        f"<div class='info-card'>"
+        f"<b>Modèle actif :</b> {champion} {_opt_label}"
+        f" · F1 = {_active_f1:.4f}"
+        f"</div>",
+        unsafe_allow_html=True)
 
     st.markdown("---")
     input_cols = st.columns(4)
@@ -1170,24 +1172,26 @@ with tabs[6]:
         res_col1, res_col2 = st.columns([1, 1])
 
         with res_col1:
+            conf_pct = prob[0]*100 if pred == 0 else prob[1]*100
             if pred == 0:
-                st.markdown(f"""
-                <div class='pred-malicious'>
-                <div class='pred-title' style='color:#ff4d6d;'>🚨 MALVEILLANT</div>
-                <div class='pred-conf'>Confiance : {prob[0]*100:.1f}%</div>
-                <div style='margin-top:.5rem;font-size:.8rem;color:#9aa5cc;'>
-                Ce fichier PE présente des caractéristiques malveillantes
-                </div>
-                </div>""", unsafe_allow_html=True)
+                html_pred = (
+                    "<div class='pred-malicious'>"
+                    "<div class='pred-title' style='color:#ff4d6d;'>🚨 MALVEILLANT</div>"
+                    f"<div class='pred-conf'>Confiance : {conf_pct:.1f}%</div>"
+                    "<div style='margin-top:.5rem;font-size:.8rem;color:#9aa5cc;'>"
+                    "Ce fichier PE présente des caractéristiques malveillantes"
+                    "</div></div>"
+                )
             else:
-                st.markdown(f"""
-                <div class='pred-legit'>
-                <div class='pred-title' style='color:#00d98b;'>✅ LÉGITIME</div>
-                <div class='pred-conf'>Confiance : {prob[1]*100:.1f}%</div>
-                <div style='margin-top:.5rem;font-size:.8rem;color:#9aa5cc;'>
-                Ce fichier PE semble légitime
-                </div>
-                </div>""", unsafe_allow_html=True)
+                html_pred = (
+                    "<div class='pred-legit'>"
+                    "<div class='pred-title' style='color:#00d98b;'>✅ LÉGITIME</div>"
+                    f"<div class='pred-conf'>Confiance : {conf_pct:.1f}%</div>"
+                    "<div style='margin-top:.5rem;font-size:.8rem;color:#9aa5cc;'>"
+                    "Ce fichier PE semble légitime"
+                    "</div></div>"
+                )
+            st.markdown(html_pred, unsafe_allow_html=True)
 
         with res_col2:
             fig, ax = nfig(5, 3.5)
@@ -1241,50 +1245,60 @@ with tabs[7]:
     r1, r2 = st.columns(2)
 
     with r1:
-        st.markdown(f"""
-        <div class='info-card good'>
-        <b>📊 Dataset</b><br>
-        • {n_total:,} fichiers PE analysés<br>
-        • {n_legit:,} légitimes ({n_legit/n_total*100:.1f}%) · {n_malware:,} malveillants<br>
-        • {len(feature_cols)} features d'analyse statique<br>
-        • Split train/test : {int((1-test_size)*100)}/{int(test_size*100)}%
-        </div>
+        medals = ["🥇", "🥈", "🥉"]
+        ranking_html = ""
+        for i, (mname, mscore) in enumerate(metrics_df["F1-Score"].sort_values(ascending=False).items()):
+            medal = medals[i] if i < len(medals) else "▪"
+            ranking_html += f"{medal} <b>{mname}</b> — F1={mscore:.4f}<br>"
 
-        <div class='info-card'>
-        <b>🏅 Classement des modèles</b><br>
-        {''.join([
-            f"{'🥇' if i==0 else '🥈' if i==1 else '🥉'} "
-            f"<b>{name}</b> — F1={score:.4f}<br>"
-            for i, (name, score) in enumerate(
-                metrics_df['F1-Score'].sort_values(ascending=False).items())
-        ])}
-        </div>
-        """, unsafe_allow_html=True)
+        html_r1 = (
+            "<div class='info-card good'>"
+            "<b>📊 Dataset</b><br>"
+            f"• {n_total:,} fichiers PE analysés<br>"
+            f"• {n_legit:,} légitimes ({n_legit/n_total*100:.1f}%) · {n_malware:,} malveillants<br>"
+            f"• {len(feature_cols)} features d'analyse statique<br>"
+            f"• Split train/test : {int((1-test_size)*100)}/{int(test_size*100)}%"
+            "</div>"
+            "<br>"
+            "<div class='info-card'>"
+            "<b>🏅 Classement des modèles</b><br>"
+            f"{ranking_html}"
+            "</div>"
+        )
+        st.markdown(html_r1, unsafe_allow_html=True)
 
     with r2:
         opt_str = ""
         if run_grid and grid_res:
-            gain = (grid_res['f1'] - results[champion]['f1']) * 100
+            gain = (grid_res["f1"] - results[champion]["f1"]) * 100
+            params_str = ", ".join([str(k) + "=" + str(v) for k, v in grid_res["best_params"].items()])
+            f1_before = results[champion]["f1"]
+            f1_after  = grid_res["f1"]
+            cv_f1_val = grid_res["best_cv_f1"]
             opt_str = (
-                f"<div class='info-card good'>"
-                f"<b>🔧 Optimisation GridSearchCV</b><br>"
-                f"• Meilleurs hyperparamètres : "
-                f"{', '.join([f'{k}={v}' for k,v in grid_res['best_params'].items()])}<br>"
-                f"• F1 avant : {results[champion]['f1']:.4f} → Après : {grid_res['f1']:.4f}"
-                f" ({gain:+.2f}%)<br>"
-                f"• CV F1 : {grid_res['best_cv_f1']:.4f}"
-                f"</div>"
+                "<div class='info-card good'>"
+                "<b>🔧 Optimisation GridSearchCV</b><br>"
+                f"• Meilleurs hyperparamètres : {params_str}<br>"
+                f"• F1 avant : {f1_before:.4f} → Après : {f1_after:.4f} ({gain:+.2f}%)<br>"
+                f"• CV F1 : {cv_f1_val:.4f}"
+                "</div>"
             )
-        st.markdown(f"""
-        <div class='info-card info'>
-        <b>🎯 Métriques finales — {champion}</b><br>
-        • Accuracy  : {(grid_res['accuracy'] if run_grid and grid_res else results[champion]['accuracy']):.4f}<br>
-        • Precision : {(grid_res['precision'] if run_grid and grid_res else results[champion]['precision']):.4f}<br>
-        • Recall    : {(grid_res['recall'] if run_grid and grid_res else results[champion]['recall']):.4f}<br>
-        • F1-Score  : {best_f1:.4f}
-        </div>
-        {opt_str}
-        """, unsafe_allow_html=True)
+
+        _acc  = grid_res["accuracy"]  if (run_grid and grid_res) else results[champion]["accuracy"]
+        _prec = grid_res["precision"] if (run_grid and grid_res) else results[champion]["precision"]
+        _rec  = grid_res["recall"]    if (run_grid and grid_res) else results[champion]["recall"]
+
+        html_r2 = (
+            "<div class='info-card info'>"
+            f"<b>🎯 Métriques finales — {champion}</b><br>"
+            f"• Accuracy  : {_acc:.4f}<br>"
+            f"• Precision : {_prec:.4f}<br>"
+            f"• Recall    : {_rec:.4f}<br>"
+            f"• F1-Score  : {best_f1:.4f}"
+            "</div>"
+            + ("<br>" + opt_str if opt_str else "")
+        )
+        st.markdown(html_r2, unsafe_allow_html=True)
 
     sec("Recommandations")
     best_feat = feature_cols[0]
@@ -1334,12 +1348,17 @@ with tabs[7]:
             use_container_width=True)
 
     sec("Informations techniques")
-    st.markdown(f"""
-    <div class='info-card' style='font-family:JetBrains Mono,monospace;font-size:.8rem;'>
-    <b>Environnement</b><br>
-    Dataset : {up.name} · {n_total:,} lignes · {len(feature_cols)} features<br>
-    Split   : {int((1-test_size)*100)}/{int(test_size*100)} · Seed={random_seed} · CV={cv_folds} folds<br>
-    Models  : {' · '.join(results.keys())}<br>
-    Champion: {champion} · GridSearch={'Oui' if run_grid else 'Non'}<br>
-    Librairies : scikit-learn · pandas · numpy · matplotlib · seaborn · streamlit
-    </div>""", unsafe_allow_html=True)
+    _models_str = " · ".join(results.keys())
+    _gs_str = "Oui" if run_grid else "Non"
+    _split_str = f"{int((1-test_size)*100)}/{int(test_size*100)}"
+    html_tech = (
+        "<div class='info-card' style='font-family:JetBrains Mono,monospace;font-size:.8rem;'>"
+        "<b>Environnement</b><br>"
+        f"Dataset : {up.name} · {n_total:,} lignes · {len(feature_cols)} features<br>"
+        f"Split   : {_split_str} · Seed={random_seed} · CV={cv_folds} folds<br>"
+        f"Models  : {_models_str}<br>"
+        f"Champion: {champion} · GridSearch={_gs_str}<br>"
+        "Librairies : scikit-learn · pandas · numpy · matplotlib · seaborn · streamlit"
+        "</div>"
+    )
+    st.markdown(html_tech, unsafe_allow_html=True)
