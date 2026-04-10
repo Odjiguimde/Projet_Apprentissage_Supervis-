@@ -63,12 +63,6 @@ def _safe_get(pe_attr, default=0):
 #  Extraction principale
 # ─────────────────────────────────────────────
 def extract_features(file_path: str) -> Optional[dict]:
-    """
-    Extrait les features statiques d'un fichier PE.
-
-    Retourne un dictionnaire feature_name → valeur,
-    ou None si le fichier n'est pas un PE valide.
-    """
     if not PEFILE_AVAILABLE:
         raise RuntimeError("pefile n'est pas installé.")
 
