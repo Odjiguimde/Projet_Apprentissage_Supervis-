@@ -255,7 +255,7 @@ st.markdown("""
                   border-left: solid #1565C0; margin:0.5rem 0; }
   .malware-card { border-left-color:#E53935 !important; background:#FFEBEE; }
   .benin-card   { border-left-color:#43A047 !important; background:#E8F5E9; }
-  .metric-val   { font-size:2rem; font-weight:700; }
+  .metric-val   { font-size:; font-weight:700; }
 </style>
 """, unsafe_allow_html=True)
 
