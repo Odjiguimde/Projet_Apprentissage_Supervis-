@@ -1,418 +1,416 @@
-"""
-app/main.py
------------
-Interface Streamlit de démo pour la classification de malwares.
-Lance avec : streamlit run app/main.py
-"""
-
-import os
-import sys
-import tempfile
-import joblib
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
+import joblib
+from datetime import datetime
+import warnings
+warnings.filterwarnings("ignore")
 
-import os
-import math
-import hashlib
-from typing import Optional
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import (confusion_matrix, roc_curve, auc,
+                             accuracy_score, precision_score, recall_score, f1_score,
+                             classification_report, RocCurveDisplay)
 
-try:
-    import pefile
-    PEFILE_AVAILABLE = True
-except ImportError:
-    PEFILE_AVAILABLE = False
-    print("[!] pefile non installé — pip install pefile")
-
-
-# ─────────────────────────────────────────────
-#  Utilitaires
-# ─────────────────────────────────────────────
-def _entropy(data: bytes) -> float:
-    if not data:
-        return 0.0
-    freq = [0] * 256
-    for byte in data:
-        freq[byte] += 1
-    n = len(data)
-    entropy = 0.0
-    for f in freq:
-        if f > 0:
-            p = f / n
-            entropy -= p * math.log2(p)
-    return round(entropy, 6)
-
-
-def _safe_get(pe_attr, default=0):
-    try:
-        return pe_attr
-    except Exception:
-        return default
-
-
-# ─────────────────────────────────────────────
-#  Extraction principale
-# ─────────────────────────────────────────────
-def extract_features(file_path: str) -> Optional[dict]:
-    if not PEFILE_AVAILABLE:
-        raise RuntimeError("pefile n'est pas installé.")
-
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"Fichier introuvable : {file_path}")
-
-    try:
-        pe = pefile.PE(file_path)
-    except pefile.PEFormatError as e:
-        print(f"[!] Fichier PE invalide : {e}")
-        return None
-
-    features = {}
-
-    # ── Taille du fichier ───────────────────────────────────────
-    features["FileSize"]         = os.path.getsize(file_path)
-
-    # ── En-tête DOS ─────────────────────────────────────────────
-    features["e_magic"]          = _safe_get(pe.DOS_HEADER.e_magic)
-    features["e_lfanew"]         = _safe_get(pe.DOS_HEADER.e_lfanew)
-
-    # ── FILE_HEADER ─────────────────────────────────────────────
-    features["Machine"]          = _safe_get(pe.FILE_HEADER.Machine)
-    features["NumberOfSections"] = _safe_get(pe.FILE_HEADER.NumberOfSections)
-    features["TimeDateStamp"]    = _safe_get(pe.FILE_HEADER.TimeDateStamp)
-    features["Characteristics"]  = _safe_get(pe.FILE_HEADER.Characteristics)
-
-    # ── OPTIONAL_HEADER ─────────────────────────────────────────
-    oh = pe.OPTIONAL_HEADER
-    features["MajorLinkerVersion"]      = _safe_get(oh.MajorLinkerVersion)
-    features["MinorLinkerVersion"]      = _safe_get(oh.MinorLinkerVersion)
-    features["SizeOfCode"]              = _safe_get(oh.SizeOfCode)
-    features["SizeOfInitializedData"]   = _safe_get(oh.SizeOfInitializedData)
-    features["SizeOfUninitializedData"] = _safe_get(oh.SizeOfUninitializedData)
-    features["AddressOfEntryPoint"]     = _safe_get(oh.AddressOfEntryPoint)
-    features["BaseOfCode"]              = _safe_get(oh.BaseOfCode)
-    features["ImageBase"]               = _safe_get(oh.ImageBase)
-    features["SectionAlignment"]        = _safe_get(oh.SectionAlignment)
-    features["FileAlignment"]           = _safe_get(oh.FileAlignment)
-    features["MajorOperatingSystemVersion"] = _safe_get(oh.MajorOperatingSystemVersion)
-    features["MajorImageVersion"]       = _safe_get(oh.MajorImageVersion)
-    features["MajorSubsystemVersion"]   = _safe_get(oh.MajorSubsystemVersion)
-    features["SizeOfImage"]             = _safe_get(oh.SizeOfImage)
-    features["SizeOfHeaders"]           = _safe_get(oh.SizeOfHeaders)
-    features["CheckSum"]                = _safe_get(oh.CheckSum)
-    features["Subsystem"]               = _safe_get(oh.Subsystem)
-    features["DllCharacteristics"]      = _safe_get(oh.DllCharacteristics)
-    features["SizeOfStackReserve"]      = _safe_get(oh.SizeOfStackReserve)
-    features["SizeOfStackCommit"]       = _safe_get(oh.SizeOfStackCommit)
-    features["SizeOfHeapReserve"]       = _safe_get(oh.SizeOfHeapReserve)
-    features["SizeOfHeapCommit"]        = _safe_get(oh.SizeOfHeapCommit)
-    features["LoaderFlags"]             = _safe_get(oh.LoaderFlags)
-    features["NumberOfRvaAndSizes"]     = _safe_get(oh.NumberOfRvaAndSizes)
-
-    # ── Sections ─────────────────────────────────────────────────
-    section_entropies = []
-    section_sizes     = []
-    for section in pe.sections:
-        try:
-            data = section.get_data()
-            section_entropies.append(_entropy(data))
-            section_sizes.append(len(data))
-        except Exception:
-            pass
-
-    features["SectionsNb"]            = len(pe.sections)
-    features["SectionsMeanEntropy"]   = round(sum(section_entropies) / len(section_entropies), 6) \
-                                         if section_entropies else 0.0
-    features["SectionsMaxEntropy"]    = round(max(section_entropies), 6) \
-                                         if section_entropies else 0.0
-    features["SectionsMinEntropy"]    = round(min(section_entropies), 6) \
-                                         if section_entropies else 0.0
-    features["SectionsMeanRawsize"]   = int(sum(section_sizes) / len(section_sizes)) \
-                                         if section_sizes else 0
-    features["SectionsMaxRawsize"]    = max(section_sizes) if section_sizes else 0
-
-    # ── Imports ───────────────────────────────────────────────────
-    try:
-        import_count = sum(len(entry.imports) for entry in pe.DIRECTORY_ENTRY_IMPORT)
-        dll_count    = len(pe.DIRECTORY_ENTRY_IMPORT)
-    except AttributeError:
-        import_count = 0
-        dll_count    = 0
-    features["ImportsNbDLL"]  = dll_count
-    features["ImportsNb"]     = import_count
-
-    # ── Exports ───────────────────────────────────────────────────
-    try:
-        exports_nb = len(pe.DIRECTORY_ENTRY_EXPORT.symbols)
-    except AttributeError:
-        exports_nb = 0
-    features["ExportNb"] = exports_nb
-
-    # ── Entropie globale du fichier ───────────────────────────────
-    with open(file_path, "rb") as f:
-        raw = f.read()
-    features["FileEntropy"] = _entropy(raw)
-
-    # ── MD5 (non utilisé pour l'inférence mais utile au logging) ─
-    features["MD5"] = hashlib.md5(raw).hexdigest()
-
-    pe.close()
-    return features
-
-
-# ─────────────────────────────────────────────
-#  Alignement sur les features du modèle
-# ─────────────────────────────────────────────
-def align_features(raw_features: dict, model_feature_names: list) -> list:
-    """
-    Réordonne et complète le vecteur de features pour correspondre
-    exactement aux colonnes attendues par le modèle.
-    """
-    vector = []
-    for col in model_feature_names:
-        vector.append(raw_features.get(col, 0))
-    return vector
-
-
-# ─────────────────────────────────────────────
-#  Inférence directe
-# ─────────────────────────────────────────────
-def predict_file(file_path: str,
-                 model,
-                 scaler,
-                 feature_names: list) -> dict:
-    Retourne :
-        {"prediction": "Malware"|"Bénin",
-         "probability": float,
-         "features": dict}
-    import numpy as np
-
-    raw = extract_features(file_path)
-    if raw is None:
-        return {"error": "Fichier PE invalide ou non parseable."}
-
-    vector   = align_features(raw, feature_names)
-    X        = np.array(vector).reshape(1, -1)
-    X_scaled = scaler.transform(X)
-
-    label_map = {0: "Bénin", 1: "Malware"}
-    pred      = model.predict(X_scaled)[0]
-    label     = label_map.get(int(pred), str(pred))
-
-    proba = None
-    if hasattr(model, "predict_proba"):
-        proba = round(float(model.predict_proba(X_scaled)[0][int(pred)]), 4)
-
-    return {
-        "prediction":  label,
-        "probability": proba,
-        "features":    raw,
-    }
-
-
-# ─────────────────────────────────────────────
-#  Test en ligne de commande
-# ─────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage : python feature_extractor.py <chemin_vers_fichier.exe>")
-        sys.exit(1)
-
-    feats = extract_features(sys.argv[1])
-    if feats:
-        import json
-        print(json.dumps({k: v for k, v in feats.items() if k != "MD5"},
-                         indent=2))
-
-
-# ─────────────────────────────────────────────
-#  Configuration de la page
-# ─────────────────────────────────────────────
+# ----------------------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------------------
 st.set_page_config(
-    page_title="🛡️ Malware Classifier",
+    page_title="Malware Classifier Pro",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-#  CSS personnalisé
-# ─────────────────────────────────────────────
 st.markdown("""
 <style>
-  .main-title   { font-size:2; font-weight:700; color:#1565C0; }
-  .subtitle     { color:#546E7A; font-size:1rem; margin-bottom:1.5rem; }
-  .card         { background:#F8F9FA; border-radius:12px; padding:1.5rem;
-                  border-left: solid #1565C0; margin:0.5rem 0; }
-  .malware-card { border-left-color:#E53935 !important; background:#FFEBEE; }
-  .benin-card   { border-left-color:#43A047 !important; background:#E8F5E9; }
-  .metric-val   { font-size:; font-weight:700; }
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+
+[data-testid="stSidebar"] { background:#0a0c14; border-right:1px solid #1e2130; }
+[data-testid="stSidebar"] * { color:#d4d8f0 !important; }
+[data-testid="stSidebar"] label { color:#6b7499 !important; font-size:.72rem !important;
+    letter-spacing:.08em; text-transform:uppercase; }
+
+[data-testid="metric-container"] { background:#131627; border:1px solid #1e2540;
+    border-radius:12px; padding:.9rem 1.1rem; }
+[data-testid="metric-container"] label { color:#6b7499 !important; font-size:.72rem !important;
+    text-transform:uppercase; letter-spacing:.07em; }
+[data-testid="metric-container"] [data-testid="stMetricValue"] { color:#e4e8ff !important;
+    font-size:1.55rem !important; font-weight:700; }
+
+.stTabs [data-baseweb="tab-list"] { gap:2px; background:transparent;
+    border-bottom:1px solid #1e2540; padding-bottom:0; }
+.stTabs [data-baseweb="tab"] { background:transparent; color:#6b7499;
+    border-radius:8px 8px 0 0; padding:.45rem 1.1rem; font-size:.82rem; font-weight:500; }
+.stTabs [aria-selected="true"] { background:#131627 !important; color:#ef476f !important;
+    border-bottom:2px solid #ef476f; }
+
+.sec { font-size:.68rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase;
+    color:#ef476f; border-left:3px solid #ef476f; padding-left:.55rem;
+    margin:1.4rem 0 .7rem; }
+
+.kpi-badge { display:inline-block; background:#131627; border:1px solid #1e2540;
+    border-radius:8px; padding:.3rem .8rem; font-size:.8rem; color:#a0a8cc;
+    margin:.2rem .2rem .2rem 0; }
+.kpi-badge b { color:#ef476f; }
+
+.insight { background:#0f1221; border:1px solid #1e2540; border-left:3px solid #ef476f;
+    border-radius:10px; padding:.9rem 1.1rem; margin:.4rem 0;
+    font-size:.86rem; line-height:1.65; color:#b0b8d8; }
+.insight b { color:#ef476f; }
+.insight.warn  { border-left-color:#f4a261; } .insight.warn  b { color:#f4a261; }
+.insight.good  { border-left-color:#52b788; } .insight.good  b { color:#52b788; }
+
+.main .block-container { background:#080a12; padding-top:1.2rem; max-width:1400px; }
+footer { visibility:hidden; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-#  Chargement du modèle (mis en cache)
-# ─────────────────────────────────────────────
-@st.cache_resource
-def load_model():
-    base = os.path.join(os.path.dirname(__file__), "..", "models")
-    try:
-        model  = joblib.load(os.path.join(base, "best_model.pkl"))
-        scaler = joblib.load(os.path.join(base, "scaler.pkl"))
-        meta   = joblib.load(os.path.join(base, "meta.pkl"))
-        return model, scaler, meta
-    except FileNotFoundError:
-        return None, None, None
+# ----------------------------------------------------------------------
+# THEME GRAPHIQUES
+# ----------------------------------------------------------------------
+PAL  = ["#ef476f","#52b788","#7b9cff","#f4a261","#64dfdf","#ffd166"]
+BG   = "#131627"
+GRID = "#1e2540"
+TEXT = "#b0b8d8"
 
+plt.rcParams.update({
+    "figure.facecolor": BG, "axes.facecolor": BG, "axes.edgecolor": GRID,
+    "axes.labelcolor": TEXT, "axes.titlecolor": "#e4e8ff", "axes.titlesize": 11,
+    "axes.titleweight": "600", "xtick.color": TEXT, "ytick.color": TEXT,
+    "text.color": TEXT, "legend.facecolor": BG, "legend.edgecolor": GRID,
+    "legend.labelcolor": TEXT, "grid.color": GRID, "grid.linestyle": "--",
+    "grid.linewidth": 0.5, "axes.grid": True, "figure.dpi": 110,
+})
 
-model, scaler, meta = load_model()
+def nfig(w=9, h=4):
+    fig, ax = plt.subplots(figsize=(w, h))
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+    return fig, ax
 
-# ─────────────────────────────────────────────
-#  Barre latérale
-# ─────────────────────────────────────────────
+def th(ax, title="", xl="", yl=""):
+    for sp in ax.spines.values():
+        sp.set_edgecolor(GRID)
+        sp.set_linewidth(0.5)
+    if title: ax.set_title(title)
+    if xl:    ax.set_xlabel(xl)
+    if yl:    ax.set_ylabel(yl)
+
+def sec(label):
+    st.markdown(f'<div class="sec">{label}</div>', unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------
+# CHARGEMENT DES DONNEES
+# ----------------------------------------------------------------------
+@st.cache_data
+def load_data(file):
+    df = pd.read_csv(file)
+    # La colonne cible est 'legitimate' : 1 = légitime, 0 = malware
+    # On la renomme pour plus de clarté
+    df.rename(columns={'legitimate': 'target'}, inplace=True)
+    return df
+
+# ----------------------------------------------------------------------
+# PREPARATION DES DONNEES
+# ----------------------------------------------------------------------
+def prepare_data(df, feature_cols):
+    X = df[feature_cols].copy()
+    y = df['target'].copy()
+    
+    # Normalisation
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    
+    return X_scaled, y, scaler
+
+# ----------------------------------------------------------------------
+# ENTRAINEMENT ET EVALUATION
+# ----------------------------------------------------------------------
+def train_and_evaluate(model, X_train, X_test, y_train, y_test):
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else None
+    
+    metrics = {
+        'accuracy': accuracy_score(y_test, y_pred),
+        'precision': precision_score(y_test, y_pred),
+        'recall': recall_score(y_test, y_pred),
+        'f1': f1_score(y_test, y_pred)
+    }
+    
+    return model, metrics, y_pred, y_proba
+
+# ----------------------------------------------------------------------
+# SIDEBAR
+# ----------------------------------------------------------------------
 with st.sidebar:
-    st.image("https://via.placeholder.com/200x60/1565C0/FFFFFF?text=MalwareML",
-             width=200)
+    st.markdown("## 🛡️ Malware Classifier")
     st.markdown("---")
-    st.markdown("### ℹ️ À propos")
-    st.info(
-        "Ce système classe les fichiers Windows PE "
-        "(.exe, .dll) comme **Bénins** ou **Malwares** "
-        "par analyse statique et apprentissage supervisé."
-    )
-    st.markdown("---")
-
-    if meta:
-        st.markdown("### 🏆 Modèle Actif")
-        st.success(f"**{meta['champion']}**")
-        st.markdown("**Métriques (test set)**")
-        for k, v in meta["metrics"].items():
-            st.metric(label=k, value=v)
+    
+    uploaded_file = st.file_uploader("Charger le dataset CSV", type=["csv"])
+    
+    if uploaded_file is not None:
+        df = load_data(uploaded_file)
+        st.success(f"✓ {len(df)} échantillons chargés")
+        st.markdown(f"<small>Légitimes: {df['target'].sum()} | Malwares: {len(df)-df['target'].sum()}</small>", unsafe_allow_html=True)
+        
+        st.markdown("---")
+        sec("Configuration du modèle")
+        
+        # Sélection des features (toutes sauf la cible)
+        feature_cols = [c for c in df.columns if c != 'target']
+        selected_features = st.multiselect(
+            "Variables à utiliser", 
+            feature_cols, 
+            default=feature_cols
+        )
+        
+        # Choix du modèle
+        algorithm = st.selectbox(
+            "Algorithme", 
+            ["Random Forest", "SVM (Support Vector Machine)", "KNN (K-Nearest Neighbors)"]
+        )
+        
+        # Hyperparamètres simplifiés
+        if algorithm == "Random Forest":
+            n_estimators = st.slider("Nombre d'arbres", 50, 300, 100, 50)
+            max_depth = st.slider("Profondeur max", 5, 30, 15, 5)
+            model_params = {"n_estimators": n_estimators, "max_depth": max_depth, "random_state": 42}
+            model = RandomForestClassifier(**model_params)
+            
+        elif algorithm == "SVM (Support Vector Machine)":
+            C = st.select_slider("Paramètre C (régularisation)", options=[0.1, 1, 10, 100], value=1)
+            gamma = st.select_slider("Gamma", options=['scale', 'auto', 0.1, 1], value='scale')
+            model_params = {"C": C, "gamma": gamma, "random_state": 42, "probability": True}
+            model = SVC(**model_params)
+            
+        else:  # KNN
+            n_neighbors = st.slider("Nombre de voisins (k)", 3, 15, 5, 2)
+            weights = st.selectbox("Pondération", ["uniform", "distance"])
+            model_params = {"n_neighbors": n_neighbors, "weights": weights}
+            model = KNeighborsClassifier(**model_params)
+        
+        st.markdown("---")
+        sec("Optimisation")
+        optimize = st.checkbox("Activer GridSearchCV (recherche des meilleurs hyperparamètres)")
+        
+        if optimize and algorithm == "Random Forest":
+            st.info("GridSearch explorera différentes combinaisons d'arbres et de profondeur")
+        
+        train_btn = st.button("🚀 Lancer l'entraînement", use_container_width=True, type="primary")
+        
     else:
-        st.warning("⚠️ Aucun modèle chargé.\nLancez d'abord `train.py`.")
+        st.info("📂 Veuillez charger le fichier DatasetmalwareExtrait.csv")
+        df = None
+        train_btn = False
 
-    st.markdown("---")
-    st.caption("Projet ML — 4A Cycle Ingénieur")
-
-# ─────────────────────────────────────────────
-#  En-tête principal
-# ─────────────────────────────────────────────
-st.markdown('<div class="main-title">🛡️ Système Expert de Classification de Malwares</div>',
-            unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Analyse Statique & Apprentissage Supervisé</div>',
-            unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-#  Onglets
-# ─────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🔍 Analyse de Fichier", "📊 Résultats", "📈 À propos du Modèle"])
-
-with tab1:
-    st.markdown("### Uploader un fichier exécutable Windows")
-    st.caption("Formats acceptés : `.exe`, `.dll`")
-
-    uploaded = st.file_uploader(
-        "Choisir un fichier",
-        type=["exe", "dll"],
-        help="Le fichier sera analysé statiquement (aucun code exécuté).",
+# ----------------------------------------------------------------------
+# MAIN
+# ----------------------------------------------------------------------
+if df is not None and train_btn and selected_features:
+    
+    # Préparation des données
+    X_scaled, y, scaler = prepare_data(df, selected_features)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y
     )
-
-    col_btn, col_space = st.columns([1, 4])
-    analyze_btn = col_btn.button("🔬 Analyser", use_container_width=True,
-                                 disabled=(uploaded is None or model is None))
-
-    if uploaded and analyze_btn:
-        with tempfile.NamedTemporaryFile(delete=False,
-                                         suffix=os.path.splitext(uploaded.name)[-1]) as tmp:
-            tmp.write(uploaded.getvalue())
-            tmp_path = tmp.name
-
-        with st.spinner("Extraction des features en cours..."):
-            result = predict_file(tmp_path, model, scaler, meta["feature_names"])
-        os.unlink(tmp_path)
-
-        if "error" in result:
-            st.error(f"❌ Erreur : {result['error']}")
-        else:
-            st.session_state["result"] = result
-            st.session_state["filename"] = uploaded.name
-            st.success("✅ Analyse terminée ! Consultez l'onglet **Résultats**.")
-
-    if model is None:
-        st.warning("⚠️ Le modèle n'est pas encore entraîné. Exécutez `python src/train.py` d'abord.")
-
-with tab2:
-    if "result" not in st.session_state:
-        st.info("Uploader et analyser un fichier dans l'onglet **Analyse de Fichier**.")
+    
+    # Optimisation GridSearch (optionnelle)
+    if optimize and algorithm == "Random Forest":
+        with st.spinner("Recherche des meilleurs hyperparamètres (GridSearchCV)..."):
+            param_grid = {
+                'n_estimators': [50, 100, 150],
+                'max_depth': [10, 15, 20],
+                'min_samples_split': [2, 5]
+            }
+            grid_search = GridSearchCV(
+                RandomForestClassifier(random_state=42),
+                param_grid, cv=5, scoring='f1', n_jobs=-1
+            )
+            grid_search.fit(X_train, y_train)
+            best_model = grid_search.best_estimator_
+            st.success(f"✅ Meilleurs paramètres: {grid_search.best_params_}")
+            st.markdown(f"<div class='insight good'>Meilleur F1-Score (validation croisée): <b>{grid_search.best_score_:.4f}</b></div>", unsafe_allow_html=True)
+            model = best_model
     else:
-        result   = st.session_state["result"]
-        filename = st.session_state.get("filename", "inconnu")
-        pred     = result["prediction"]
-        proba    = result["probability"]
-        features = result["features"]
-
-        # ── Verdict ──────────────────────────────────────────────
-        card_class = "malware-card" if pred == "Malware" else "benin-card"
-        icon       = "🔴" if pred == "Malware" else "🟢"
+        with st.spinner(f"Entraînement du modèle {algorithm}..."):
+            model.fit(X_train, y_train)
+    
+    # Évaluation
+    model, metrics, y_pred, y_proba = train_and_evaluate(
+        model, X_train, X_test, y_train, y_test
+    )
+    
+    # Sauvegarde du modèle et du scaler pour la prédiction future
+    joblib.dump(model, "best_model.pkl")
+    joblib.dump(scaler, "scaler.pkl")
+    joblib.dump(selected_features, "features.pkl")
+    
+    # ------------------------------------------------------------------
+    # AFFICHAGE DES RESULTATS
+    # ------------------------------------------------------------------
+    st.markdown("# Classification de Malwares - Résultats")
+    st.markdown(
+        f"<span class='kpi-badge'><b>{algorithm}</b> · "
+        f"{len(X_train)} entraînement · {len(X_test)} test</span>"
+        f"<span class='kpi-badge'>Ratio Malwares: <b>{(1-y.mean())*100:.1f}%</b></span>",
+        unsafe_allow_html=True)
+    
+    # KPIs
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Accuracy", f"{metrics['accuracy']*100:.2f}%")
+    col2.metric("Precision", f"{metrics['precision']*100:.2f}%")
+    col3.metric("Recall", f"{metrics['recall']*100:.2f}%")
+    col4.metric("F1-Score", f"{metrics['f1']*100:.2f}%")
+    
+    st.markdown("---")
+    
+    # Tabs
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Matrice de confusion", "📈 Courbe ROC", "🔍 Rapport de classification", "💻 Prédiction en ligne"
+    ])
+    
+    with tab1:
+        sec("Matrice de confusion")
+        fig, ax = nfig(5, 4)
+        cm = confusion_matrix(y_test, y_pred)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Reds", ax=ax,
+                    annot_kws={"size":14, "fontweight":"600", "color":"white"},
+                    linewidths=.5, linecolor=BG,
+                    xticklabels=["Légitime", "Malware"],
+                    yticklabels=["Légitime", "Malware"])
+        ax.set_xlabel("Prédit")
+        ax.set_ylabel("Réel")
+        th(ax, "Matrice de confusion")
+        st.pyplot(fig, use_container_width=True)
+        plt.close()
+        
         st.markdown(f"""
-        <div class="card {card_class}">
-          <div style="font-size:1.1rem; color:#555;">Fichier analysé : <b>{filename}</b></div>
-          <div class="metric-val" style="margin:0.5rem 0;">{icon} {pred}</div>
-          {"<div>Confiance : <b>" + str(round(proba * 100, 1)) + "%</b></div>" if proba else ""}
+        <div class='insight'>
+        <b>Interprétation :</b><br>
+        • <b>Vrais Négatifs (VN)</b> : {cm[0,0]} légitimes correctement identifiés.<br>
+        • <b>Vrais Positifs (VP)</b> : {cm[1,1]} malwares correctement détectés.<br>
+        • <b>Faux Positifs (FP)</b> : {cm[0,1]} légitimes classés comme malwares (fausses alertes).<br>
+        • <b>Faux Négatifs (FN)</b> : {cm[1,0]} malwares non détectés (risque majeur).
         </div>
-        # ── Jauge de confiance ────────────────────────────────────
-        if proba is not None:
-            st.markdown("#### Niveau de confiance")
-            fig, ax = plt.subplots(figsize=(7, 0.7))
-            color = "#E53935" if pred == "Malware" else "#43A047"
-            ax.barh([""], [proba], color=color)
-            ax.barh([""], [1 - proba], left=[proba], color="#EEEEEE")
-            ax.set_xlim(0, 1)
-            ax.axis("off")
-            ax.text(proba / 2, 0, f"{proba * 100:.1f}%",
-                    ha="center", va="center", color="white", fontweight="bold")
+        """, unsafe_allow_html=True)
+    
+    with tab2:
+        sec("Courbe ROC (Receiver Operating Characteristic)")
+        if y_proba is not None:
+            fpr, tpr, _ = roc_curve(y_test, y_proba)
+            roc_auc = auc(fpr, tpr)
+            
+            fig, ax = nfig(6, 4.5)
+            ax.plot(fpr, tpr, color=PAL[0], lw=2.5, label=f"AUC = {roc_auc:.3f}")
+            ax.plot([0,1], [0,1], color=GRID, lw=1, ls="--", label="Aléatoire")
+            ax.fill_between(fpr, tpr, alpha=.12, color=PAL[0])
+            ax.legend(fontsize=10, loc="lower right")
+            th(ax, "Courbe ROC", xl="Taux de faux positifs (1 - Spécificité)", yl="Taux de vrais positifs (Sensibilité)")
+            ax.set_xlim([0,1])
+            ax.set_ylim([0,1.02])
             st.pyplot(fig, use_container_width=True)
             plt.close()
-
-        # ── Features extraites ────────────────────────────────────
-        st.markdown("#### Features Statiques Extraites")
-        df_feat = pd.DataFrame(
-            [(k, v) for k, v in features.items() if k != "MD5"],
-            columns=["Feature", "Valeur"]
+            
+            st.markdown(f"""
+            <div class='insight good'>
+            <b>Aire sous la courbe (AUC) = {roc_auc:.3f}</b><br>
+            Un score proche de 1 indique une excellente capacité du modèle à distinguer les malwares des fichiers légitimes.
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.warning("Ce modèle ne fournit pas de probabilités (utilisez Random Forest ou SVM avec probability=True).")
+    
+    with tab3:
+        sec("Rapport de classification détaillé")
+        report = classification_report(y_test, y_pred, target_names=["Légitime", "Malware"], output_dict=True)
+        report_df = pd.DataFrame(report).transpose().round(3)
+        st.dataframe(report_df, use_container_width=True)
+        
+        # Validation croisée
+        sec("Validation croisée (Cross-Validation)")
+        cv_scores = cross_val_score(model, X_scaled, y, cv=5, scoring='f1')
+        st.markdown(f"""
+        <div class='insight'>
+        • Scores F1 par fold : {', '.join([f"{s:.3f}" for s in cv_scores])}<br>
+        • **F1 moyen (CV-5) : {cv_scores.mean():.4f}** (± {cv_scores.std():.4f})
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Feature Importance (Random Forest uniquement)
+        if algorithm == "Random Forest" and hasattr(model, "feature_importances_"):
+            sec("Importance des caractéristiques")
+            imp_df = pd.DataFrame({
+                'feature': selected_features,
+                'importance': model.feature_importances_
+            }).sort_values('importance', ascending=False)
+            
+            fig, ax = nfig(8, 5)
+            ax.barh(imp_df['feature'].head(10), imp_df['importance'].head(10), 
+                    color=PAL[0], edgecolor=BG, alpha=.85)
+            th(ax, "Top 10 des caractéristiques les plus importantes", xl="Importance")
+            ax.grid(axis='y', visible=False)
+            st.pyplot(fig, use_container_width=True)
+            plt.close()
+    
+    with tab4:
+        sec("Prédiction en temps réel")
+        st.markdown("Entrez les caractéristiques d'un fichier PE pour prédire s'il est malveillant :")
+        
+        # Création des champs de saisie pour chaque feature
+        cols = st.columns(3)
+        input_data = {}
+        for i, feat in enumerate(selected_features):
+            col = cols[i % 3]
+            # Valeur médiane du dataset comme valeur par défaut
+            default_val = float(df[feat].median())
+            input_data[feat] = col.number_input(feat, value=default_val, format="%.2f")
+        
+        if st.button("🔍 Analyser le fichier", use_container_width=True, type="primary"):
+            # Création du DataFrame de prédiction
+            input_df = pd.DataFrame([input_data])
+            # Normalisation avec le scaler entraîné
+            input_scaled = scaler.transform(input_df[selected_features])
+            # Prédiction
+            pred = model.predict(input_scaled)[0]
+            proba = model.predict_proba(input_scaled)[0] if hasattr(model, "predict_proba") else [0, 0]
+            
+            if pred == 1:
+                st.error(f"🚨 **MALWARE DÉTECTÉ !** (Probabilité : {proba[1]*100:.2f}%)")
+                st.markdown("<div class='insight alert'>Ce fichier présente des caractéristiques malveillantes. Une analyse approfondie est recommandée.</div>", unsafe_allow_html=True)
+            else:
+                st.success(f"✅ **Fichier LÉGITIME** (Probabilité : {proba[0]*100:.2f}%)")
+                st.markdown("<div class='insight good'>Aucune signature malveillante détectée.</div>", unsafe_allow_html=True)
+    
+    # Export du modèle
+    st.markdown("---")
+    sec("Export")
+    col_exp1, col_exp2 = st.columns(2)
+    with col_exp1:
+        st.download_button(
+            "📥 Télécharger le modèle (best_model.pkl)",
+            data=open("best_model.pkl", "rb").read(),
+            file_name="malware_classifier.pkl",
+            mime="application/octet-stream",
+            use_container_width=True
         )
-        st.dataframe(df_feat, use_container_width=True, height=350)
+    with col_exp2:
+        st.download_button(
+            "📥 Télécharger le scaler (scaler.pkl)",
+            data=open("scaler.pkl", "rb").read(),
+            file_name="scaler.pkl",
+            mime="application/octet-stream",
+            use_container_width=True
+        )
 
-        if "MD5" in features:
-            st.caption(f"MD5 : `{features['MD5']}`")
-
-with tab3:
-    if meta is None:
-        st.warning("Aucun modèle chargé.")
-    else:
-        st.markdown("### Informations sur le Modèle")
-        col1, col2 = st.columns(2)
-        col1.metric("Modèle Champion", meta["champion"])
-        col1.metric("Nombre de Features", len(meta["feature_names"]))
-
-        for k, v in meta["metrics"].items():
-            col2.metric(k, v)
-
-        st.markdown("### Features Utilisées")
-        st.write(meta["feature_names"])
-
-        # Images de résultats si disponibles
-        results_dir = os.path.join(os.path.dirname(__file__), "..", "results")
-        images = {
-            "Comparaison des Modèles": "model_comparison.png",
-            "Matrice de Confusion":    "confusion_matrix.png",
-            "Courbe ROC":              "roc_curve.png",
-            "Courbe Précision-Rappel": "precision_recall_curve.png",
-            "Importance des Features": "feature_importance.png",
-        }
-        for title, fname in images.items():
-            path = os.path.join(results_dir, fname)
-            if os.path.exists(path):
-                st.markdown(f"#### {title}")
-                st.image(path)
+elif df is None:
+    st.info("👈 Chargez votre fichier CSV dans la barre latérale pour commencer.")
+else:
+    st.warning("Veuillez sélectionner au moins une variable et lancer l'entraînement.")
