@@ -369,8 +369,6 @@ with tab2:
           <div class="metric-val" style="margin:0.5rem 0;">{icon} {pred}</div>
           {"<div>Confiance : <b>" + str(round(proba * 100, 1)) + "%</b></div>" if proba else ""}
         </div>
-        """, unsafe_allow_html=True)
-
         # ── Jauge de confiance ────────────────────────────────────
         if proba is not None:
             st.markdown("#### Niveau de confiance")
