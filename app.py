@@ -7,6 +7,7 @@ import seaborn as sns
 import warnings
 import time
 import io
+import gc
 warnings.filterwarnings("ignore")
 
 from sklearn.preprocessing import StandardScaler
@@ -31,6 +32,34 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ──────────────────────────────────────────────
+# INIT SESSION STATE
+# ──────────────────────────────────────────────
+if "results" not in st.session_state:
+    st.session_state.results = None
+if "grid_res" not in st.session_state:
+    st.session_state.grid_res = None
+if "champion" not in st.session_state:
+    st.session_state.champion = None
+if "df" not in st.session_state:
+    st.session_state.df = None
+if "X_train" not in st.session_state:
+    st.session_state.X_train = None
+if "X_test" not in st.session_state:
+    st.session_state.X_test = None
+if "y_train" not in st.session_state:
+    st.session_state.y_train = None
+if "y_test" not in st.session_state:
+    st.session_state.y_test = None
+if "scaler" not in st.session_state:
+    st.session_state.scaler = None
+if "X_train_sc" not in st.session_state:
+    st.session_state.X_train_sc = None
+if "X_test_sc" not in st.session_state:
+    st.session_state.X_test_sc = None
+if "trained" not in st.session_state:
+    st.session_state.trained = False
 
 # ──────────────────────────────────────────────
 # THEME & CSS
@@ -294,6 +323,9 @@ with st.sidebar:
     use_knn = st.checkbox("K-Nearest Neighbors", True)
 
     st.markdown("---")
+    train_button = st.button("🚀 Lancer l'entraînement", use_container_width=True, type="primary")
+    
+    st.markdown("---")
     st.markdown(
         "<small style='color:#4a5580;font-family:JetBrains Mono,monospace;'>"
         "v1.0 · Malware PE Classifier</small>",
@@ -365,7 +397,8 @@ if up is None:
 # ──────────────────────────────────────────────
 file_bytes = up.read()
 df_raw = load_data(file_bytes, up.name)
-df     = preprocess(file_bytes, up.name)
+df = preprocess(file_bytes, up.name)
+st.session_state.df = df
 
 if "legitimate" not in df.columns:
     st.error("❌ Colonne 'legitimate' introuvable. Vérifiez votre fichier.")
@@ -402,7 +435,7 @@ kpi_cols[4].metric("Features PE",      f"{len(feature_cols)}")
 st.markdown("---")
 
 # ──────────────────────────────────────────────
-# PREPROCESSING
+# PREPROCESSING (toujours fait)
 # ──────────────────────────────────────────────
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=test_size, random_state=random_seed, stratify=y)
@@ -411,10 +444,19 @@ scaler = StandardScaler()
 X_train_sc = scaler.fit_transform(X_train)
 X_test_sc  = scaler.transform(X_test)
 
+# Stocker dans session state
+st.session_state.X_train = X_train.values
+st.session_state.X_test = X_test.values
+st.session_state.y_train = y_train.values
+st.session_state.y_test = y_test.values
+st.session_state.scaler = scaler
+st.session_state.X_train_sc = X_train_sc
+st.session_state.X_test_sc = X_test_sc
+st.session_state.feature_cols = feature_cols
+
 # ──────────────────────────────────────────────
-# TRAIN ALL MODELS
+# TRAIN ALL MODELS (sans cache)
 # ──────────────────────────────────────────────
-@st.cache_data
 def train_all_models(_X_train, _X_test, _X_train_sc, _X_test_sc,
                      _y_train, _y_test, use_svm, use_rf, use_knn,
                      cv_folds, run_grid, random_seed):
@@ -482,7 +524,6 @@ def train_all_models(_X_train, _X_test, _X_train_sc, _X_test_sc,
     return results
 
 
-@st.cache_data
 def run_gridsearch(_X_train, _X_test, _X_train_sc, _X_test_sc,
                    _y_train, _y_test, champion_name, cv_folds, random_seed):
 
@@ -546,39 +587,67 @@ def run_gridsearch(_X_train, _X_test, _X_train_sc, _X_test_sc,
     }
 
 
-# ── Spinner pendant l'entraînement ──
-with st.spinner("⚙️  Entraînement des modèles en cours…"):
-    results = train_all_models(
-        X_train.values, X_test.values,
-        X_train_sc, X_test_sc,
-        y_train.values, y_test.values,
-        use_svm, use_rf, use_knn,
-        cv_folds, run_grid, random_seed
-    )
+# ── Entraînement déclenché par bouton ──
+if train_button:
+    with st.spinner("⚙️  Entraînement des modèles en cours…"):
+        st.session_state.results = train_all_models(
+            st.session_state.X_train, st.session_state.X_test,
+            st.session_state.X_train_sc, st.session_state.X_test_sc,
+            st.session_state.y_train, st.session_state.y_test,
+            use_svm, use_rf, use_knn,
+            cv_folds, run_grid, random_seed
+        )
+        
+        if st.session_state.results:
+            # Identify champion
+            metrics_df = pd.DataFrame({
+                n: {'Accuracy': r['accuracy'], 'Precision': r['precision'],
+                    'Recall': r['recall'], 'F1-Score': r['f1'], 'CV F1': r['cv_f1']}
+                for n, r in st.session_state.results.items()
+            }).T.round(4)
+            st.session_state.champion = metrics_df['F1-Score'].idxmax()
+            
+            # GridSearch
+            st.session_state.grid_res = None
+            if run_grid:
+                with st.spinner(f"🔧  GridSearchCV sur {st.session_state.champion}…"):
+                    st.session_state.grid_res = run_gridsearch(
+                        st.session_state.X_train, st.session_state.X_test,
+                        st.session_state.X_train_sc, st.session_state.X_test_sc,
+                        st.session_state.y_train, st.session_state.y_test,
+                        st.session_state.champion, cv_folds, random_seed
+                    )
+        
+        st.session_state.trained = True
+        gc.collect()
+        st.rerun()
+
+# ──────────────────────────────────────────────
+# AFFICHAGE CONDITIONNEL (seulement si entraîné)
+# ──────────────────────────────────────────────
+if not st.session_state.trained:
+    st.info("👈 Cliquez sur 'Lancer l'entraînement' dans la sidebar pour commencer.")
+    st.stop()
+
+results = st.session_state.results
+grid_res = st.session_state.grid_res
+champion = st.session_state.champion
+feature_cols = st.session_state.feature_cols
+X_train_vals = st.session_state.X_train
+X_test_vals = st.session_state.X_test
+y_train_vals = st.session_state.y_train
+y_test_vals = st.session_state.y_test
+scaler = st.session_state.scaler
 
 if not results:
     st.warning("Aucun modèle sélectionné. Cochez au moins un modèle dans la sidebar.")
     st.stop()
 
-# ── Identify champion ──
 metrics_df = pd.DataFrame({
     n: {'Accuracy': r['accuracy'], 'Precision': r['precision'],
         'Recall': r['recall'], 'F1-Score': r['f1'], 'CV F1': r['cv_f1']}
     for n, r in results.items()
 }).T.round(4)
-
-champion = metrics_df['F1-Score'].idxmax()
-
-# ── GridSearch ──
-grid_res = None
-if run_grid:
-    with st.spinner(f"🔧  GridSearchCV sur {champion}…"):
-        grid_res = run_gridsearch(
-            X_train.values, X_test.values,
-            X_train_sc, X_test_sc,
-            y_train.values, y_test.values,
-            champion, cv_folds, random_seed
-        )
 
 # ──────────────────────────────────────────────
 # TABS
@@ -622,7 +691,8 @@ with tabs[0]:
                     ha='center', fontsize=9, fontweight='700', color='#e8edff')
         th(ax, "Répartition des classes", yl="Effectif")
         ax.grid(axis='x', visible=False)
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     sec("Distribution des features")
     n_feat = len(feature_cols)
@@ -646,7 +716,8 @@ with tabs[0]:
     plt.suptitle("Distributions des features par classe",
                  color='#e8edff', fontsize=12, fontweight='700', y=1.01)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
     sec("Matrice de corrélation")
     fig, ax = plt.subplots(figsize=(10, 7))
@@ -662,7 +733,8 @@ with tabs[0]:
     ax.set_title("Corrélations entre variables", color='#e8edff', fontsize=11, fontweight='700')
     ax.tick_params(colors=TEXT, labelsize=8)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
     sec("Boxplots par classe")
     fig2, axes2 = plt.subplots(n_rows_plot, n_cols_plot,
@@ -682,7 +754,8 @@ with tabs[0]:
     fig2.patch.set_facecolor(BG)
     plt.suptitle("Boxplots par classe", color='#e8edff', fontsize=12, fontweight='700', y=1.01)
     plt.tight_layout()
-    st.pyplot(fig2, use_container_width=True); plt.close()
+    st.pyplot(fig2, clear_figure=True, use_container_width=True)
+    plt.close(fig2)
 
 # ══════════════════════════════════════════════
 # TAB 1 — RÉSULTATS MODÈLES
@@ -733,13 +806,14 @@ with tabs[1]:
     ax.legend(fontsize=10)
     th(ax, "Comparaison des performances", yl="Score")
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
     sec("Rapports de classification détaillés")
     for name, res in results.items():
         with st.expander(f"📄 Rapport — {name} (F1={res['f1']:.4f})", expanded=(name == champion)):
             report_str = classification_report(
-                y_test, res['y_pred'], target_names=['Malveillant', 'Légitime'])
+                y_test_vals, res['y_pred'], target_names=['Malveillant', 'Légitime'])
             st.code(report_str, language='text')
 
 # ══════════════════════════════════════════════
@@ -753,7 +827,7 @@ with tabs[2]:
         axes = [axes]
     cmaps = ['Blues', 'Greens', 'Purples', 'Oranges']
     for ax, (name, res), cmap in zip(axes, results.items(), cmaps):
-        cm = confusion_matrix(y_test, res['y_pred'])
+        cm = confusion_matrix(y_test_vals, res['y_pred'])
         disp = ConfusionMatrixDisplay(cm, display_labels=['Malveillant', 'Légitime'])
         disp.plot(ax=ax, cmap=cmap, colorbar=False)
         champ_str = " 🏆" if name == champion else ""
@@ -763,7 +837,8 @@ with tabs[2]:
     fig.patch.set_facecolor(BG)
     plt.suptitle("Matrices de Confusion", color='#e8edff', fontsize=13, fontweight='700', y=1.02)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
     col_roc, col_pr = st.columns(2)
 
@@ -771,7 +846,7 @@ with tabs[2]:
         sec("Courbes ROC")
         fig, ax = nfig(7, 5)
         for i, (name, res) in enumerate(results.items()):
-            fpr, tpr, _ = roc_curve(y_test, res['y_proba'])
+            fpr, tpr, _ = roc_curve(y_test_vals, res['y_proba'])
             roc_auc = auc(fpr, tpr)
             ls = ['-', '--', '-.'][i % 3]
             ax.plot(fpr, tpr, lw=2.5, ls=ls, color=PAL[i],
@@ -782,13 +857,14 @@ with tabs[2]:
         ax.set_xlim([-.01, 1]); ax.set_ylim([0, 1.02])
         th(ax, "Courbes ROC", xl="Taux Faux Positifs", yl="Taux Vrais Positifs")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     with col_pr:
         sec("Courbes Précision-Rappel")
         fig, ax = nfig(7, 5)
         for i, (name, res) in enumerate(results.items()):
-            prec_c, rec_c, _ = precision_recall_curve(y_test, res['y_proba'])
+            prec_c, rec_c, _ = precision_recall_curve(y_test_vals, res['y_proba'])
             pr_auc = auc(rec_c, prec_c)
             ls = ['-', '--', '-.'][i % 3]
             ax.plot(rec_c, prec_c, lw=2.5, ls=ls, color=PAL[i],
@@ -798,7 +874,8 @@ with tabs[2]:
         ax.set_xlim([0, 1]); ax.set_ylim([0, 1.05])
         th(ax, "Courbes Précision-Rappel", xl="Rappel", yl="Précision")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     sec("Distributions des probabilités de prédiction")
     fig, axes = plt.subplots(1, n_models, figsize=(5*n_models, 3.5))
@@ -806,7 +883,7 @@ with tabs[2]:
     for ax, (name, res) in zip(axes, results.items()):
         ax.set_facecolor(BG)
         for label, color, lbl in [(1, PAL[0], 'Légitime'), (0, PAL[3], 'Malveillant')]:
-            mask_l = y_test.values == label
+            mask_l = y_test_vals == label
             ax.hist(res['y_proba'][mask_l], bins=40, alpha=.6, color=color,
                     label=lbl, density=True)
         ax.axvline(.5, color='white', ls='--', lw=1.2, alpha=.7)
@@ -816,15 +893,16 @@ with tabs[2]:
     plt.suptitle("Distributions des probabilités", color='#e8edff',
                  fontsize=12, fontweight='700', y=1.02)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
     sec("Cross-Validation F1 par modèle")
     cv_data = {}
     for name, res in results.items():
-        Xc = res['X_tr'] if name != 'Random Forest' else X_train.values
+        Xc = res['X_tr'] if name != 'Random Forest' else X_train_vals
         Xc_all = np.vstack([res['X_tr'], res['X_te']]) if name != 'Random Forest' \
-                 else np.vstack([X_train.values, X_test.values])
-        y_all  = np.concatenate([y_train.values, y_test.values])
+                 else np.vstack([X_train_vals, X_test_vals])
+        y_all  = np.concatenate([y_train_vals, y_test_vals])
         scores = cross_val_score(res['model'], Xc_all, y_all,
                                  cv=StratifiedKFold(cv_folds), scoring='f1')
         cv_data[name] = scores
@@ -843,7 +921,8 @@ with tabs[2]:
     th(ax, f"Distribution F1 — {cv_folds}-Fold Cross-Validation", yl="F1-Score")
     ax.grid(axis='x', visible=False)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
 # ══════════════════════════════════════════════
 # TAB 3 — OPTIMISATION
@@ -890,13 +969,13 @@ with tabs[3]:
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
         fig.patch.set_facecolor(BG)
 
-        cm_b = confusion_matrix(y_test, results[champion]['y_pred'])
+        cm_b = confusion_matrix(y_test_vals, results[champion]['y_pred'])
         ConfusionMatrixDisplay(cm_b, display_labels=['Malveillant', 'Légitime']).plot(
             ax=axes[0], cmap='Oranges', colorbar=False)
         axes[0].set_title(f"Avant Optimisation\nF1 = {f1_base:.4f}", fontweight='700')
         axes[0].tick_params(colors=TEXT)
 
-        cm_o = confusion_matrix(y_test, grid_res['y_pred'])
+        cm_o = confusion_matrix(y_test_vals, grid_res['y_pred'])
         ConfusionMatrixDisplay(cm_o, display_labels=['Malveillant', 'Légitime']).plot(
             ax=axes[1], cmap='Greens', colorbar=False)
         axes[1].set_title(f"Après Optimisation\nF1 = {f1_opt:.4f}", fontweight='700')
@@ -905,7 +984,8 @@ with tabs[3]:
         plt.suptitle(f"{champion} — Avant vs Après GridSearchCV",
                      color='#e8edff', fontsize=13, fontweight='700', y=1.02)
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
         sec("Courbes ROC comparatives")
         fig, ax = nfig(10, 5)
@@ -913,7 +993,7 @@ with tabs[3]:
             ("Avant (base)", results[champion]['y_proba'], PAL[3], '--'),
             ("Après (optimisé)", grid_res['y_proba'], PAL[0], '-')
         ]:
-            fpr, tpr, _ = roc_curve(y_test, yp)
+            fpr, tpr, _ = roc_curve(y_test_vals, yp)
             a = auc(fpr, tpr)
             ax.plot(fpr, tpr, lw=2.5, ls=ls, color=color, label=f"{label} (AUC={a:.4f})")
             ax.fill_between(fpr, tpr, alpha=.08, color=color)
@@ -922,10 +1002,11 @@ with tabs[3]:
         th(ax, f"ROC — {champion} Avant/Après Optimisation",
            xl="FPR", yl="TPR")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
         sec("Rapport de classification — Modèle Optimisé")
-        st.code(classification_report(y_test, grid_res['y_pred'],
+        st.code(classification_report(y_test_vals, grid_res['y_pred'],
                                       target_names=['Malveillant', 'Légitime']),
                 language='text')
 
@@ -979,7 +1060,8 @@ with tabs[4]:
             ax.grid(axis='y', visible=False)
             ax.set_xlim(0, importances.max() * 1.2)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True); plt.close()
+            st.pyplot(fig, clear_figure=True, use_container_width=True)
+            plt.close(fig)
 
         with f_b:
             sec("Importance cumulée")
@@ -995,7 +1077,8 @@ with tabs[4]:
             ax.set_ylim(0, 105)
             th(ax, "Importance cumulée des features", xl="Features", yl="% cumulé")
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True); plt.close()
+            st.pyplot(fig, clear_figure=True, use_container_width=True)
+            plt.close(fig)
 
         sec("Matrice de corrélation features × cible")
         corr_with_target = df.corr()['legitimate'].drop('legitimate').sort_values(key=abs, ascending=False)
@@ -1017,7 +1100,8 @@ with tabs[4]:
         th(ax, "Corrélation des features avec la variable cible", xl="Corrélation de Pearson")
         ax.grid(axis='y', visible=False)
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     else:
         st.markdown("""<div class='info-card warn'>
@@ -1048,7 +1132,8 @@ with tabs[4]:
     plt.suptitle("Violins des features par classe", color='#e8edff',
                  fontsize=12, fontweight='700', y=1.02)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
 # ══════════════════════════════════════════════
 # TAB 5 — PCA / CLUSTERING
@@ -1074,7 +1159,8 @@ with tabs[5]:
            xl=f"PC1 ({var_exp[0]*100:.1f}%)",
            yl=f"PC2 ({var_exp[1]*100:.1f}%)")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     with p2:
         sec("Variance expliquée cumulative")
@@ -1091,12 +1177,13 @@ with tabs[5]:
         th(ax, "Variance expliquée par composante PCA",
            xl="Composante", yl="%")
         plt.tight_layout()
-        st.pyplot(fig, use_container_width=True); plt.close()
+        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        plt.close(fig)
 
     sec("Décision boundary PCA (modèle champion)")
-    best_model_for_vis = grid_res['best_model'] if (run_grid and grid_res) else results[champion]['model']
-    pca_train = pca_2d.transform(X_all_sc[:len(X_train)])
-    pca_test  = pca_2d.transform(X_all_sc[len(X_train):])
+    best_model_for_vis = grid_res['best_model'] if (run_grid and grid_res is not None) else results[champion]['model']
+    pca_train = pca_2d.transform(X_all_sc[:len(X_train_vals)])
+    pca_test  = pca_2d.transform(X_all_sc[len(X_train_vals):])
 
     # Simple scatter avec regions colorées
     fig, ax = nfig(10, 6)
@@ -1124,7 +1211,8 @@ with tabs[5]:
        yl=f"PC2 ({var_exp[1]*100:.1f}%)")
     ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
     plt.tight_layout()
-    st.pyplot(fig, use_container_width=True); plt.close()
+    st.pyplot(fig, clear_figure=True, use_container_width=True)
+    plt.close(fig)
 
 # ══════════════════════════════════════════════
 # TAB 6 — PRÉDICTION LIVE
@@ -1136,11 +1224,11 @@ with tabs[6]:
     Utilise le <b>modèle champion optimisé</b> (ou le meilleur modèle de base si GridSearch désactivé).
     </div>""", unsafe_allow_html=True)
 
-    active_model = grid_res['best_model'] if (run_grid and grid_res) else results[champion]['model']
+    active_model = grid_res['best_model'] if (run_grid and grid_res is not None) else results[champion]['model']
     needs_scale  = results[champion]['needs_scale'] if champion in results else True
 
-    _opt_label = "(GridSearch optimisé)" if (run_grid and grid_res) else "(modèle de base)"
-    _active_f1 = grid_res["f1"] if (run_grid and grid_res) else results[champion]["f1"]
+    _opt_label = "(GridSearch optimisé)" if (run_grid and grid_res is not None) else "(modèle de base)"
+    _active_f1 = grid_res["f1"] if (run_grid and grid_res is not None) else results[champion]["f1"]
     st.markdown(
         f"<div class='info-card'>"
         f"<b>Modèle actif :</b> {champion} {_opt_label}"
@@ -1205,19 +1293,20 @@ with tabs[6]:
             th(ax, "Probabilités de prédiction", xl="%")
             ax.grid(axis='y', visible=False)
             plt.tight_layout()
-            st.pyplot(fig, use_container_width=True); plt.close()
+            st.pyplot(fig, clear_figure=True, use_container_width=True)
+            plt.close(fig)
 
     sec("Test en lot — Prédire sur tout le jeu de test")
     if st.button("📊 Prédire sur l'ensemble de test", use_container_width=True):
-        X_te_pred = X_test_sc if needs_scale else X_test.values
+        X_te_pred = X_test_sc if needs_scale else X_test_vals
         probas_all = active_model.predict_proba(X_te_pred)[:, 1]
         preds_all  = active_model.predict(X_te_pred)
 
-        test_results = X_test.copy()
-        test_results['Vrai_label']    = y_test.values
+        test_results = pd.DataFrame(X_test_vals, columns=feature_cols).copy()
+        test_results['Vrai_label']    = y_test_vals
         test_results['Prédit']        = preds_all
         test_results['Prob_Légitime'] = probas_all.round(4)
-        test_results['Correct']       = (preds_all == y_test.values)
+        test_results['Correct']       = (preds_all == y_test_vals)
         test_results['Verdict']       = test_results['Prédit'].map({1: '✅ Légitime', 0: '🚨 Malveillant'})
 
         st.dataframe(test_results, use_container_width=True, height=350)
@@ -1233,7 +1322,7 @@ with tabs[7]:
     sec("Synthèse complète du projet")
 
     # Champion banner
-    best_f1 = grid_res['f1'] if (run_grid and grid_res) else results[champion]['f1']
+    best_f1 = grid_res['f1'] if (run_grid and grid_res is not None) else results[champion]['f1']
     st.markdown(
         f"<div class='champion-banner'>"
         f"<div class='trophy'>🏆</div>"
@@ -1269,7 +1358,7 @@ with tabs[7]:
 
     with r2:
         opt_str = ""
-        if run_grid and grid_res:
+        if run_grid and grid_res is not None:
             gain = (grid_res["f1"] - results[champion]["f1"]) * 100
             params_str = ", ".join([str(k) + "=" + str(v) for k, v in grid_res["best_params"].items()])
             f1_before = results[champion]["f1"]
@@ -1284,9 +1373,9 @@ with tabs[7]:
                 "</div>"
             )
 
-        _acc  = grid_res["accuracy"]  if (run_grid and grid_res) else results[champion]["accuracy"]
-        _prec = grid_res["precision"] if (run_grid and grid_res) else results[champion]["precision"]
-        _rec  = grid_res["recall"]    if (run_grid and grid_res) else results[champion]["recall"]
+        _acc  = grid_res["accuracy"]  if (run_grid and grid_res is not None) else results[champion]["accuracy"]
+        _prec = grid_res["precision"] if (run_grid and grid_res is not None) else results[champion]["precision"]
+        _rec  = grid_res["recall"]    if (run_grid and grid_res is not None) else results[champion]["recall"]
 
         html_r2 = (
             "<div class='info-card info'>"
@@ -1362,3 +1451,5 @@ with tabs[7]:
         "</div>"
     )
     st.markdown(html_tech, unsafe_allow_html=True)
+
+gc.collect()
