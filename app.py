@@ -14,13 +14,6 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-""
-feature_extractor.py
---------------------
-Extraction de features statiques depuis un fichier PE (.exe, .dll)
-via la bibliothèque pefile.
-"""
-
 import os
 import math
 import hashlib
