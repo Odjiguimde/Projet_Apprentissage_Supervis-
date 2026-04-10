@@ -19,8 +19,6 @@ feature_extractor.py
 --------------------
 Extraction de features statiques depuis un fichier PE (.exe, .dll)
 via la bibliothèque pefile.
-
-Ces features doivent correspondre aux colonnes du dataset d'entraînement.
 """
 
 import os
