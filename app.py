@@ -252,7 +252,7 @@ st.markdown("""
   .main-title   { font-size:2; font-weight:700; color:#1565C0; }
   .subtitle     { color:#546E7A; font-size:1rem; margin-bottom:1.5rem; }
   .card         { background:#F8F9FA; border-radius:12px; padding:1.5rem;
-                  border-left:5px solid #1565C0; margin:0.5rem 0; }
+                  border-left: solid #1565C0; margin:0.5rem 0; }
   .malware-card { border-left-color:#E53935 !important; background:#FFEBEE; }
   .benin-card   { border-left-color:#43A047 !important; background:#E8F5E9; }
   .metric-val   { font-size:2rem; font-weight:700; }
