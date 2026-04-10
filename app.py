@@ -189,14 +189,10 @@ def predict_file(file_path: str,
                  model,
                  scaler,
                  feature_names: list) -> dict:
-    """
-    Pipeline complet : fichier PE → prédiction.
-
     Retourne :
         {"prediction": "Malware"|"Bénin",
          "probability": float,
          "features": dict}
-    """
     import numpy as np
 
     raw = extract_features(file_path)
